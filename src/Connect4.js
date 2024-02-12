@@ -2,6 +2,52 @@ const { disableButtons, formatMessage, ButtonBuilder } = require('../utils/utils
 const { EmbedBuilder, ActionRowBuilder } = require('discord.js');
 const approve = require('../utils/approve');
 
+// Author: Alex Wanjohi
+async function moveMessageToThread(msg, originalMessageId, targetThreadId) {
+  try {
+    // Fetch the original message
+    const originalMessage = await msg.channel.messages.fetch(originalMessageId);
+    const messageContent = originalMessage.content; // Get the content of the original message
+    const messageEmbeds = originalMessage.embeds; // Get the embeds of the original message
+
+    console.log("targetThreadId" + targetThreadId);
+    // Fetch the target thread
+    const thread = await msg.channel.threads.fetch(targetThreadId);
+
+    // Check if the fetched thread is a valid ThreadChannel object
+    if (!thread || !thread.send || typeof thread.send !== 'function') {
+      throw new Error('Invalid or unexpected thread object.');
+    }
+    // Send a new message in the target thread with similar content or modifications
+    const sentMessage = await thread.send({
+      content: messageContent,
+      embeds: messageEmbeds
+    });
+
+    console.log(`Message moved to thread ${targetThreadId}: ${sentMessage.content}`);
+    return sentMessage; // Return the sent message object if needed
+  } catch (error) {
+    console.error('Error moving message to thread:', error);
+    throw new Error('Error moving message to thread.');
+  }
+}
+
+// Author: Alex Wanjohi
+async function deleteThread(msg, threadId) {
+  try {
+    const thread = await msg.channel.threads.fetch(threadId);
+
+    if (thread && thread.isThread()) {
+      // Delete the thread
+      await thread.delete();
+      console.log('Thread deleted successfully.');
+    } else {
+      console.log('Invalid thread ID or the channel is not a thread.');
+    }
+  } catch (error) {
+    console.error('Error deleting the thread:', error);
+  }
+}
 
 module.exports = class Connect4 extends approve {
   constructor(options = {}) {
@@ -9,6 +55,8 @@ module.exports = class Connect4 extends approve {
     if (!options.isSlashGame) options.isSlashGame = false;
     if (!options.message) throw new TypeError('NO_MESSAGE: No message option was provided.');
     if (!options.opponent) throw new TypeError('NO_OPPONENT: No opponent option was provided.');
+    if (!options.threadId) throw new TypeError('NO_THREAD: No thread option was provided.');
+
     if (typeof options.message !== 'object') throw new TypeError('INVALID_MESSAGE: message option must be an object.');
     if (typeof options.isSlashGame !== 'boolean') throw new TypeError('INVALID_COMMAND_TYPE: isSlashGame option must be a boolean.');
     if (typeof options.opponent !== 'object') throw new TypeError('INVALID_OPPONENT: opponent option must be an object.');
@@ -57,7 +105,7 @@ module.exports = class Connect4 extends approve {
     this.options = options;
     this.message = options.message;
     this.opponent = options.opponent;
-    this.player1Turn = true;
+    this.player1Turn = Math.random() >= 0.5; // Author: Alex Wanjohi - Get random beginner - returns true or false
     this.gameBoard = [];
 
     for (let y = 0; y < 6; y++) {
@@ -65,6 +113,8 @@ module.exports = class Connect4 extends approve {
         this.gameBoard[y * 7 + x] = this.options.emojis.board;
       }
     }
+
+    this.threadId = options.threadId; // Author: Alex Wanjohi
   }
 
 
@@ -86,7 +136,7 @@ module.exports = class Connect4 extends approve {
     else return await this.message.channel.send(content).catch(e => {});
   }
 
-  async startGame() {
+  async startGame( threadId ) {
     if (this.options.isSlashGame || !this.message.author) {
       if (!this.message.deferred) await this.message.deferReply().catch(e => {});
       this.message.author = this.message.user;
@@ -94,11 +144,11 @@ module.exports = class Connect4 extends approve {
     }
 
     const approve = await this.approve();
-    if (approve) this.connect4Game(approve);
+    if (approve) this.connect4Game(approve, threadId);
   }
 
 
-  async connect4Game(msg) {
+  async connect4Game(msg, threadId) {
 
     const embed = new EmbedBuilder()
     .setColor(this.options.embed.color)
@@ -118,7 +168,7 @@ module.exports = class Connect4 extends approve {
     const row1 = new ActionRowBuilder().addComponents(btn1, btn2, btn3, btn4);
     const row2 = new ActionRowBuilder().addComponents(btn5, btn6, btn7);
 
-    msg = await msg.edit({ content: null, embeds: [embed], components: [row1, row2] });
+    msg = await msg.edit({ content: null, embeds: [embed], components: [row1, row2], thread: this.threadId });
     return this.handleButtons(msg);
   }
 
@@ -166,8 +216,28 @@ module.exports = class Connect4 extends approve {
       .addFields({ name: this.options.embed.statusTitle, value: this.getTurnMessage() })
       .setFooter({ text: `${this.message.author.tag} vs ${this.opponent.tag}` })
 
-      return await msg.edit({ embeds: [embed], components: msg.components });
-    })
+      return await msg.edit({ embeds: [embed], components: msg.components, thread: this.threadId })
+          .then(sentMessage => {
+              // Handle the sent message if needed
+              const originalMessageId = msg.id; // Replace with the actual original message ID
+              const targetThreadId = this.threadId; // Replace with the actual target thread ID
+
+              console.log("originalMessageId " + originalMessageId);
+              console.log("this.threadId " + this.threadId);
+
+              moveMessageToThread(this.message, originalMessageId, targetThreadId)
+                  .then(sentMessage => {
+                    // Handle the sent message if needed
+                  })
+                  .catch(error => {
+                    // Handle errors
+                  });
+
+            })
+                .catch(error => {
+                  // Handle errors
+                });
+          });
 
     collector.on('end', async (_, reason) => {
       if (reason === 'idle' || reason === 'user') {
@@ -179,8 +249,21 @@ module.exports = class Connect4 extends approve {
 
   async gameOver(msg, result) {
     const Connect4Game = { player: this.message.author, opponent: this.opponent };
-    if (result === 'win') Connect4Game.winner = this.player1Turn ? this.message.author.id : this.opponent.id;
-    this.emit('gameOver',  { result: result, ...Connect4Game });
+    if (result === 'win'){
+      Connect4Game.winner = this.player1Turn ? this.message.author.id : this.opponent.id;
+      Connect4Game.loser = ! this.player1Turn ? this.message.author.id : this.opponent.id;
+
+      this.emit('gameOver',  { result: result, ...Connect4Game });
+
+      /**
+       * Delete private thread after 15 minutes
+       */
+      setTimeout( function() {
+        deleteThread( msg, result.threadId )
+      } , 900000);
+    } else {
+      this.emit('gameOver',  { result: result, ...Connect4Game });
+    }
 
 
     const embed = new EmbedBuilder()
@@ -190,7 +273,7 @@ module.exports = class Connect4 extends approve {
     .addFields({ name: this.options.embed.statusTitle, value: this.getTurnMessage(result + 'Message') })
     .setFooter({ text: `${this.message.author.tag} vs ${this.opponent.tag}` })
 
-    return msg.edit({ embeds: [embed], components: disableButtons(msg.components) });
+    return msg.edit({ embeds: [embed], components: disableButtons(msg.components), thread: this.threadId });
   }
 
 

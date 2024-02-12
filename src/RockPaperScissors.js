@@ -2,6 +2,52 @@ const { EmbedBuilder, ActionRowBuilder } = require('discord.js');
 const { formatMessage, ButtonBuilder } = require('../utils/utils');
 const approve = require('../utils/approve');
 
+// Author: Alex Wanjohi
+async function moveMessageToThread(msg, originalMessageId, targetThreadId) {
+  try {
+    // Fetch the original message
+    const originalMessage = await msg.channel.messages.fetch(originalMessageId);
+    const messageContent = originalMessage.content; // Get the content of the original message
+    const messageEmbeds = originalMessage.embeds; // Get the embeds of the original message
+
+    console.log("targetThreadId" + targetThreadId);
+    // Fetch the target thread
+    const thread = await msg.channel.threads.fetch(targetThreadId);
+
+    // Check if the fetched thread is a valid ThreadChannel object
+    if (!thread || !thread.send || typeof thread.send !== 'function') {
+      throw new Error('Invalid or unexpected thread object.');
+    }
+    // Send a new message in the target thread with similar content or modifications
+    const sentMessage = await thread.send({
+      content: messageContent,
+      embeds: messageEmbeds
+    });
+
+    console.log(`Message moved to thread ${targetThreadId}: ${sentMessage.content}`);
+    return sentMessage; // Return the sent message object if needed
+  } catch (error) {
+    console.error('Error moving message to thread:', error);
+    throw new Error('Error moving message to thread.');
+  }
+}
+
+// Author: Alex Wanjohi
+async function deleteThread(msg, threadId) {
+  try {
+    const thread = await msg.channel.threads.fetch(threadId);
+
+    if (thread && thread.isThread()) {
+      // Delete the thread
+      await thread.delete();
+      console.log('Thread deleted successfully.');
+    } else {
+      console.log('Invalid thread ID or the channel is not a thread.');
+    }
+  } catch (error) {
+    console.error('Error deleting the thread:', error);
+  }
+}
 
 module.exports = class RPSGame extends approve {
   constructor(options = {}) {
@@ -9,6 +55,8 @@ module.exports = class RPSGame extends approve {
     if (!options.isSlashGame) options.isSlashGame = false;
     if (!options.message) throw new TypeError('NO_MESSAGE: No message option was provided.');
     if (!options.opponent) throw new TypeError('NO_OPPONENT: No opponent option was provided.');
+    if (!options.threadId) throw new TypeError('NO_THREAD: No thread option was provided.');
+
     if (typeof options.message !== 'object') throw new TypeError('INVALID_MESSAGE: message option must be an object.');
     if (typeof options.isSlashGame !== 'boolean') throw new TypeError('INVALID_COMMAND_TYPE: isSlashGame option must be a boolean.');
     if (typeof options.opponent !== 'object') throw new TypeError('INVALID_OPPONENT: opponent option must be an object.');
@@ -69,6 +117,9 @@ module.exports = class RPSGame extends approve {
     this.opponent = options.opponent;
     this.playerPick = null;
     this.opponentPick = null;
+    this.player1Turn = Math.random() >= 0.5; // Author: Alex Wanjohi - Get random beginner - returns true or false
+    this.threadId = options.threadId; // Author: Alex Wanjohi
+
   }
 
 
@@ -77,7 +128,7 @@ module.exports = class RPSGame extends approve {
     else return await this.message.channel.send(content).catch(e => {});
   }
 
-  async startGame() {
+  async startGame( threadId ) {
     if (this.options.isSlashGame || !this.message.author) {
       if (!this.message.deferred) await this.message.deferReply().catch(e => {});
       this.message.author = this.message.user;
@@ -85,11 +136,11 @@ module.exports = class RPSGame extends approve {
     }
 
     const approve = await this.approve();
-    if (approve) this.RPSGame(approve);
+    if (approve) this.RPSGame( approve, threadId);
   }
 
 
-  async RPSGame(msg) {
+  async RPSGame(msg, threadId) {
 
     const emojis = this.options.emojis;
     const labels = this.options.buttons;
@@ -107,7 +158,7 @@ module.exports = class RPSGame extends approve {
     const s = new ButtonBuilder().setStyle(this.options.buttonStyle).setEmoji(choice.s).setCustomId('rps_s').setLabel(labels.scissors);
     const row = new ActionRowBuilder().addComponents(r, p, s);
 
-    await msg.edit({ content: null, embeds: [embed], components: [row] });
+    await msg.edit({ content: null, embeds: [embed], components: [row], thread: this.threadId });
     const collector = msg.createMessageComponentCollector({ idle: this.options.timeoutTime });
 
 
@@ -122,7 +173,7 @@ module.exports = class RPSGame extends approve {
       if (btn.user.id === this.message.author.id && !this.playerPick) {
         this.playerPick = choice[btn.customId.split('_')[1]];
         btn.followUp({ content: this.options.pickMessage.replace('{emoji}', this.playerPick), ephemeral: true });
-      } 
+      }
       else if (btn.user.id === this.opponent.id && !this.opponentPick) {
         this.opponentPick = choice[btn.customId.split('_')[1]];
         btn.followUp({ content: this.options.pickMessage.replace('{emoji}', this.opponentPick), ephemeral: true });
@@ -150,8 +201,24 @@ module.exports = class RPSGame extends approve {
 
   async gameOver(msg, result) {
     const RPSGame = { player: this.message.author, opponent: this.opponent, playerPick: this.playerPick, opponentPick: this.opponentPick };
-    if (result === 'win') RPSGame.winner = this.player1Won() ? this.message.author.id : this.opponent.id;
-    this.emit('gameOver', { result, ...RPSGame });
+    if (result === 'win'){
+      RPSGame.winner = this.player1Won() ? this.message.author.id : this.opponent.id;
+      RPSGame.loser = ! this.player1Won() ? this.message.author.id : this.opponent.id
+
+      this.emit('gameOver', { result, ...RPSGame });
+
+      /**
+       * Delete private thread after 15 minutes
+       */
+      setTimeout( function() {
+        deleteThread( msg, result.threadId )
+      } , 900000);
+
+    } else {
+      this.emit('gameOver', { result, ...RPSGame });
+    }
+
+
     this.player1Turn = this.player1Won();
 
 
@@ -163,7 +230,7 @@ module.exports = class RPSGame extends approve {
     .addFields({ name: this.message.author.username, value: this.playerPick ?? '❔', inline: true })
     .addFields({ name: 'VS', value: '⚡', inline: true })
     .addFields({ name: this.opponent.username, value: this.opponentPick ?? '❔', inline: true })
-    
-    return msg.edit({ embeds: [embed], components: [] });
+
+    return msg.edit({ embeds: [embed], components: [], thread: this.threadId });
   }
 }
